@@ -26,3 +26,5 @@ __pycache__/
 # Builds/dist
 build/
 dist/
+
+img-code
