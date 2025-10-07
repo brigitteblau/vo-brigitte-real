@@ -1,0 +1,30 @@
+python vo_hibrido.py --input test1.mp4 --method mono --show
+# ó cámara
+python vo_hibrido.py --input 0 --method mono --show
+
+con imagenes 
+python vo_hibrido.py --left "left_%06d.png" --right "right_%06d.png" --method stereo --baseline 0.12 --show
+lags útiles
+
+--min_matches 30 (subí si hay falsos positivos)
+
+--ratio 0.7 y --dist 50.0 (filtros del matcher)
+
+--no_homography (si querés apagar el filtro por H)
+
+--ransac_thresh 1.0 (umbral de findEssentialMat)
+
+--fx --fy --cx --cy (intrínsecos manuales)
+
+--baseline 0.1 (para stereo)
+
+--traj_npy, --poses_txt
+
+Qué quedó “pro” del senior
+
+Pipeline 2D→2D y 3D→2D bien separados.
+
+Filtro de matches más sólido (ratio + H).
+
+Opción de optimización con g2o (si lo tenés) y, si no, fallback a OpenCV. 
+
