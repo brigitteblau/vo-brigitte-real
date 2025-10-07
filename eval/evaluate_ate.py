@@ -10,7 +10,7 @@ trajectory and the estimated trajectory.
 import sys
 import numpy
 import argparse
-import associate
+from eval import associate  
 from datetime import datetime
 
 
