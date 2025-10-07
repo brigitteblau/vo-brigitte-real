@@ -27,4 +27,7 @@ __pycache__/
 build/
 dist/
 
-img-code
+img-code/
+
+points.ply
+
