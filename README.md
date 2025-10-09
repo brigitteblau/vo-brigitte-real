@@ -94,4 +94,4 @@ ls rgbd_dataset_freiburg1_desk/depth.txt
 
 
 Si aparece, ya está OK ✅
-Si no, asegurate de que el tar -xvzf realmente descomprimió los archivos
+Si no, asegurate de que el tar -xvzf realmente descomprimió los archivos 
