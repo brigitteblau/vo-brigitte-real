@@ -3,7 +3,7 @@ import numpy as np
 import cv2
 import copy
 from scipy.spatial.transform import Rotation
-from vo_hibrido import HybridVO
+from vo_hibrido import HybridVOcd as HybridVO      
 from optimizer import BundleAdjustment
 from typing import List
 

@@ -6,7 +6,7 @@ from typing import List
 from scipy.spatial.transform import Rotation
 from scipy.spatial.transform import Rotation as R
 
-from vo_hibrido import HybridVO          # Asegurate que __init__(self, K) esté definido así
+from vo_hibrido import HybridVOcd as HybridVO         
 from optimizer import BundleAdjustment
 from utils import project_points, angle_between
 from eval.associate import read_file_list, associate
