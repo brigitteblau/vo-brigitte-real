@@ -1,3 +1,7 @@
+python vo_hibrido.py --input test1.mp4 --method mono --show
+python slam.py
+
+
 hay que instalar el dataset antes de usarlo el dataset tum que no se puede subir al repo 
 
 Dataset externo

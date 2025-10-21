@@ -9,6 +9,7 @@ def decidir_direccion(x, y, yaw):
     Decide un comando de movimiento según la pose actual.
     Editá estas reglas con tu lógica real del SLAM.
     """
+
     if x < 1.0:
         return "adelante"
     elif yaw > math.radians(90):

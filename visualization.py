@@ -1,198 +1,125 @@
-#visualization.py
+# visualization.py
 import numpy as np
-import pypangolin as pango
-from OpenGL.GL import *
-import OpenGL.GLUT as glut
-from scipy.spatial.transform import Rotation as R
 
+# Intentamos Pangolin; si no está, caemos a Matplotlib (Windows-friendly)
+try:
+    import pypangolin as pango
+    from OpenGL.GL import (
+        glEnable, glClear, glClearColor, glBegin, glEnd, glVertex3d, glLineWidth,
+        GL_COLOR_BUFFER_BIT, GL_DEPTH_BUFFER_BIT, GL_LINES, GL_DEPTH_TEST
+    )
+    _HAS_PANGO = True
+except Exception:
+    _HAS_PANGO = False
+    import matplotlib
+    matplotlib.use("TkAgg", force=True)  # asegura ventana en Windows
+    import matplotlib.pyplot as plt
 
-class PangoVisualizer:
-    def __init__(self, title="Trajectory Viewer", width=1280, height=720) -> None:
+# Estado global
+_STATE = {
+    "pts": [],         # lista de [x,y,z]
+    "fig": None,
+    "ax": None,
+    "pango_ready": False,
+    "pango_cam": None,
+    "pango_disp": None,
+    "title": "Trayectoria",
+}
 
-        self.debug = True
-        self.width = width
-        self.height = height
-        self.win = pango.CreateWindowAndBind(title, width, height)
-        glEnable(GL_DEPTH_TEST)
+def _xyz_from_pose(p):
+    """Acepta [x,y,z] o matriz 4x4 y devuelve np.array([x,y,z])."""
+    if p is None:
+        return None
+    a = np.asarray(p)
+    if a.ndim == 1 and a.size >= 3:
+        return a[:3].astype(float)
+    if a.shape == (4, 4):
+        return a[:3, 3].astype(float)
+    raise ValueError("Pose no reconocida. Usa [x,y,z] o matriz 4x4.")
 
-        self.pm = pango.ProjectionMatrix(
-            width, height, 420, 420, width / 2, height / 2, 0.1, 1000
-        )  # width, height, fx, fy, cx, cy, near clip, far clip
-        # self.mv = pango.ModelViewLookAt(1.0, 1.0, 1.0, 0, 0, 0, pango.AxisZ)
-        # self.mv = pango.ModelViewLookAt(0.0, 0.0, 3.5, 0, 0, 0, pango.AxisX)
-        # self.mv = pango.ModelViewLookAt(1.0, 1.0, 2.0, 1.0, 1.0, 0.0, pango.AxisX)
-        # top down
-        self.mv = pango.ModelViewLookAt(0.0, 0.0, 3.0, 0.0, 0.0, 0.0, pango.AxisY)
-        self.s_cam = pango.OpenGlRenderState(self.pm, self.mv)
+# -------- Pangolin (si existe) --------
+def _init_pangolin(width=1280, height=720, title="Trajectory 3D"):
+    pango.CreateWindowAndBind(title, width, height)
+    glEnable(GL_DEPTH_TEST)
+    pm = pango.ProjectionMatrix(width, height, 420, 420, width/2, height/2, 0.1, 1000)
+    mv = pango.ModelViewLookAt(0.0, 3.0, 6.0, 0.0, 0.0, 0.0, pango.AxisY)
+    s_cam = pango.OpenGlRenderState(pm, mv)
+    handler = pango.Handler3D(s_cam)
+    d_cam = (pango.CreateDisplay()
+             .SetBounds(pango.Attach(0), pango.Attach(1), pango.Attach(0), pango.Attach(1), -width/height)
+             .SetHandler(handler))
+    _STATE["pango_cam"] = s_cam
+    _STATE["pango_disp"] = d_cam
+    _STATE["pango_ready"] = True
 
-        self.handler = pango.Handler3D(self.s_cam)
-        self.d_cam = (
-            pango.CreateDisplay()
-            .SetBounds(
-                pango.Attach(0),
-                pango.Attach(1),
-                pango.Attach(0),
-                pango.Attach(1),
-                -width / height,
-            )
-            .SetHandler(self.handler)
-        )
-
-    def _display_grid(self, grid_size, step):
-        """Draws a 3D grid on the XY, YZ, and XZ planes."""
-        glColor3f(0.5, 0.5, 0.5)  # Set grid color
-        indices = np.linspace(0, grid_size, num=int(grid_size / step + 1))
-        for i in indices:
-            glBegin(GL_LINES)
-            # X-Plane
-            p1 = np.array([i, 0, 0])
-            p2 = np.array([i, grid_size, 0])
-            glVertex3d(p1[0], p1[1], p1[2])
-            glVertex3d(p2[0], p2[1], p2[2])
-
-            p1 = np.array([0, i, 0])
-            p2 = np.array([grid_size, i, 0])
-            glVertex3d(p1[0], p1[1], p1[2])
-            glVertex3d(p2[0], p2[1], p2[2])
-
-            # Y-Plane
-            p1 = np.array([0, 0, i])
-            p2 = np.array([0, grid_size, i])
-            glVertex3d(p1[0], p1[1], p1[2])
-            glVertex3d(p2[0], p2[1], p2[2])
-
-            p1 = np.array([0, i, 0])
-            p2 = np.array([0, i, grid_size])
-            glVertex3d(p1[0], p1[1], p1[2])
-            glVertex3d(p2[0], p2[1], p2[2])
-
-            # Z-Plane
-            p1 = np.array([i, 0, 0])
-            p2 = np.array([i, 0, grid_size])
-            glVertex3d(p1[0], p1[1], p1[2])
-            glVertex3d(p2[0], p2[1], p2[2])
-
-            p1 = np.array([0, 0, i])
-            p2 = np.array([grid_size, 0, i])
-            glVertex3d(p1[0], p1[1], p1[2])
-            glVertex3d(p2[0], p2[1], p2[2])
-
-            glEnd()
-
-    def update(self, poses, landmarks=None, gt_poses=None):
-        """
-
-
-        Parameters
-        ----------
-        positions (list of 3x1 ndarray): Positions expressed as a 3x1 vector, in world frame
-        orientations (list of 3x3 ndarray): Orientations expressed as a 3x3 rotation matrix, in world frame
-
-        """
-        positions = [T[:3, 3] for T in poses]
-        orientations = [T[:3, :3] for T in poses]
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
-        self.d_cam.Activate(self.s_cam)
-        glClearColor(1.0, 1.0, 1.0, 1.0)
-        glLineWidth(2)
-
-        # Draw Trajectory
-        for i in range(len(positions) - 1):
-            glColor3f(1.0, 0.0, 0.0)
-            glBegin(GL_LINES)
-            p1 = positions[i]
-            p2 = positions[i + 1]
-            glVertex3d(p1[0], p1[1], p1[2])
-            glVertex3d(p2[0], p2[1], p2[2])
-            glEnd()
-
-        self.draw_orientation_axis(poses[-1])
-
-        if self.debug:
-            pango.glDrawAxis(1)
-            # 2x2m grid with 0.1m step
-            self._display_grid(2, 0.1)
-
-        if landmarks is not None:
-            glPointSize(5)
-            glColor3f(0.0, 1.0, 0.0)
-            pango.glDrawPoints(landmarks)
-
-        if gt_poses is not None:
-            positions = [T[:3, 3] for T in gt_poses]
-            # Draw Trajectory
-            for i in range(len(positions) - 1):
-                glColor3f(0.0, 1.0, 0.0)
-                glBegin(GL_LINES)
-                p1 = positions[i]
-                p2 = positions[i + 1]
-                glVertex3d(p1[0], p1[1], p1[2])
-                glVertex3d(p2[0], p2[1], p2[2])
-                glEnd()
-            # Draw orientation axis for latest position
-            self.draw_orientation_axis(gt_poses[-1])
-
-        pango.FinishFrame()
-        # self.save_image(f"path/{len(poses)}.png")
-
-    def save_image(self, filename):
-        v = self.d_cam.GetBounds()
-        buffer = np.empty((v.h, v.w, 4), dtype=np.uint8)
-        glReadBuffer(GL_BACK)
-        glPixelStorei(GL_PACK_ALIGNMENT, 1)
-        glReadPixels(v.l, v.b, v.w, v.h, GL_BGRA, GL_UNSIGNED_BYTE, buffer)
-        import cv2
-
-        cv2.imwrite(filename, buffer)
-
-    def draw_orientation_axis(self, pose):
-        # Draw orientation axis for latest position
-        Ow = pose[:3, 3]
-        p = np.array([0.1, 0, 0, 1])
-        Xw = pose @ p
-        p = np.array([0, 0.1, 0, 1])
-        Yw = pose @ p
-        p = np.array([0, 0, 0.1, 1])
-        Zw = pose @ p
+def _pangolin_draw():
+    pts = np.asarray(_STATE["pts"], dtype=float)
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+    _STATE["pango_disp"].Activate(_STATE["pango_cam"])
+    glClearColor(1.0, 1.0, 1.0, 1.0)
+    glLineWidth(2)
+    if len(pts) >= 2:
         glBegin(GL_LINES)
-        glColor3f(1.0, 0.0, 0.0)
-        glVertex3d(Ow[0], Ow[1], Ow[2])
-        glVertex3d(Xw[0], Xw[1], Xw[2])
-        glColor3f(0.0, 1.0, 0.0)
-        glVertex3d(Ow[0], Ow[1], Ow[2])
-        glVertex3d(Yw[0], Yw[1], Yw[2])
-        glColor3f(0.0, 0.0, 1.0)
-        glVertex3d(Ow[0], Ow[1], Ow[2])
-        glVertex3d(Zw[0], Zw[1], Zw[2])
+        for i in range(len(pts) - 1):
+            x1, y1, z1 = pts[i]
+            x2, y2, z2 = pts[i+1]
+            glVertex3d(x1, y1, z1)
+            glVertex3d(x2, y2, z2)
         glEnd()
+    pango.glDrawAxis(1.0)
+    pango.FinishFrame()
 
-    def draw_sphere(self, position):
-        glPushMatrix()
-        glTranslate(position[0], position[1], position[2])  # Translate to the position
-        glut.glutSolidSphere(0.05, 20, 20)  # Draw a sphere with radius 0.1
-        glPopMatrix()
+# -------- Matplotlib (fallback 2D) --------
+def _init_matplotlib(title="Trayectoria (X-Z)"):
+    plt.ion()
+    fig = plt.figure(title)
+    ax = fig.add_subplot(111)
+    ax.set_xlabel("X (m)")
+    ax.set_ylabel("Z (m)")
+    ax.grid(True)
+    _STATE["fig"] = fig
+    _STATE["ax"] = ax
+    _STATE["title"] = title
+    fig.canvas.draw()
+    fig.canvas.flush_events()
+    plt.show(block=False)
 
+def _matplotlib_draw():
+    pts = np.asarray(_STATE["pts"], dtype=float)
+    if pts.size == 0:
+        return
+    ax = _STATE["ax"]; fig = _STATE["fig"]
+    ax.cla()
+    ax.set_title(_STATE["title"])
+    ax.set_xlabel("X (m)"); ax.set_ylabel("Z (m)")
+    ax.grid(True)
+    ax.plot(pts[:, 0], pts[:, 2], "-")  # X vs Z
+    fig.canvas.draw()
+    fig.canvas.flush_events()
+    plt.pause(0.001)
 
-if __name__ == "__main__":
-    # Open file
-    f = open("helpers/trajectory.txt", "r")
+# -------- API pública --------
+def init_traj_view(title="Trayectoria"):
+    if _HAS_PANGO:
+        _init_pangolin(title=title)
+    else:
+        _init_matplotlib(title if title else "Trayectoria (X-Z)")
 
-    viz = PangoVisualizer()
-    positions = []
-    orientations = []
-    for line in f:
-        line = line.split(" ")
-        t = np.array([float(line[1]), float(line[2]), float(line[3])])
-        quat = np.array([float(line[4]), float(line[5]), float(line[6]), float(line[7])])
-        positions.append(t)
-        orientations.append(R.from_quat(quat).as_matrix())
-        poses = [np.eye(4) for _ in range(len(positions))]
-        for i in range(len(positions)):
-            poses[i][:3, 3] = positions[i]
-            poses[i][:3, :3] = orientations[i]
-        viz.update(poses)
+def traj_update_from_pose(pose_or_T):
+    xyz = _xyz_from_pose(pose_or_T)
+    if xyz is None:
+        return
+    _STATE["pts"].append(xyz)
+    if _HAS_PANGO:
+        if not _STATE["pango_ready"]:
+            _init_pangolin(title="Trajectory 3D")
+        _pangolin_draw()
+    else:
+        if _STATE["fig"] is None or _STATE["ax"] is None:
+            _init_matplotlib("Trayectoria (X-Z)")
+        _matplotlib_draw()
 
-    f.close()
-    # Keep drawing
-    while True:
-        viz.update(positions, orientations)
+def save_trajectory_npy(path="trajectory.npy"):
+    arr = np.asarray(_STATE["pts"], dtype=float)
+    np.save(path, arr)
+    print(f"✅ Guardado {path} con {len(arr)} poses")

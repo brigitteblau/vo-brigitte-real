@@ -10,6 +10,7 @@ from vo_hibrido import HybridVOcd as HybridVO
 from optimizer import BundleAdjustment
 from utils import project_points, angle_between
 from eval.associate import read_file_list, associate
+from visualization import traj_update_from_pose  
 
 
 """
@@ -196,6 +197,11 @@ class Tracking:
         T = self.vo._minimize_reprojection_error(p_2d, p_3d_k)
         estimated_pose = prev_frame.pose @ T
         curr_frame.pose = estimated_pose
+# === DIBUJO TRAYECTORIA ===
+        T = curr_frame.pose
+        x, y = float(T[0,3]), float(T[1,3])
+        yaw = float(np.arctan2(T[1,0], T[0,0]))
+        traj_update_from_pose(x, y, yaw)  # <— NUEVO
 
         # ---------- Determine if is keyframe -----------
         if len(p_2d) < 150 or self.frames_elapsed_since_keyframe > 20:

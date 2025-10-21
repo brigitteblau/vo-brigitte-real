@@ -28,6 +28,7 @@ import time
 import cv2
 import numpy as np
 from enum import Enum
+from visualization import init_traj_view, traj_update_from_pose, save_trajectory_npy
 
 # ------------ g2o opcional -------------
 USE_G2O = False
@@ -433,7 +434,7 @@ def main():
         sys.exit(1)
     K = estimate_intrinsics(frame0.shape, args.fx, args.fy, args.cx, args.cy)
 
-    vo = HybridVO(K, baseline=args.baseline, method=method, show=args.show,
+    vo = HybridVOcd(K, baseline=args.baseline, method=method, show=args.show,
                   min_matches=args.min_matches, ratio_thresh=args.ratio,
                   dist_thresh=args.dist, use_homography=(not args.no_homography),
                   ransac_thresh=args.ransac_thresh, save_txt=args.poses_txt)
