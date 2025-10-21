@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
 VO HÍBRIDO (Mono / Stereo / Depth)
-- Combina tu vo.py con ideas del senior (matcher robusto, homografía para filtrar, opción 3D-2D con PnP, guardado de poses, depth/disparidad opcional)
-- Dependencias básicas: opencv-python, numpy, scipy (solo para Quaternion si quieres), pero aquí uso cv2.Rodrigues/compose
-- g2o es OPCIONAL. Si está instalado, lo uso; si no, caigo en solvePnPRansac de OpenCV (más liviano).
+- ORB + Emparejamiento robusto (FLANN LSH) + Homografía opcional para filtrar
+- Mono: Essential + recoverPose (2D-2D)
+- Stereo/Depth: PnP (3D-2D) vía solvePnPRansac (g2o opcional si está)
+- Visualización: usa pypangolin si existe; si no, fallback 2D con Matplotlib (Windows-friendly)
 
 Ejemplos:
 1) Monocular (2D-2D):
@@ -11,13 +12,12 @@ Ejemplos:
 
 2) Stereo (3D-2D por disparidad):
    python vo_hibrido.py --left left_%06d.png --right right_%06d.png --method stereo --show
-   # o un .mp4 emparejado con otro .mp4 (secuencias sincronizadas; aquí se asume frame a frame)
 
 3) Depth (RGB + depth.png/exr):
    python vo_hibrido.py --input rgb.mp4 --depth depth_%06d.exr --method depth --show
 
 Salida:
-- --traj_npy trajectory.npy (N,3) posiciones
+- --traj_npy trajectory.npy (N,3)
 - --poses_txt poses.txt (timestamp x y z qx qy qz qw)
 """
 
@@ -28,7 +28,7 @@ import time
 import cv2
 import numpy as np
 from enum import Enum
-from visualization import init_traj_view, traj_update_from_pose, save_trajectory_npy
+from visualization import init_traj_view, traj_update_from_pose, save_trajectory_npy  # noqa: F401
 
 # ------------ g2o opcional -------------
 USE_G2O = False
@@ -40,15 +40,15 @@ except Exception:
 
 
 class VOMethod(Enum):
-    MONO_2D2D = 1  # Essential
-    STEREO_3D2D = 2  # PnP con disparidad (Stereo)
+    MONO_2D2D = 1   # Essential
+    STEREO_3D2D = 2 # PnP con disparidad (Stereo)
     DEPTH_3D2D = 3  # PnP con mapa de profundidad provisto
 
 
 # ---------------- Utils -----------------
 
 def open_source(src):
-    """Permite índice ("0","1"), ruta a video o patrón de imágenes (%06d)."""
+    """Permite índice ('0','1'), ruta a video o patrón de imágenes (%06d)."""
     if src is None:
         return None, None
     if isinstance(src, str) and src.isdigit():
@@ -143,7 +143,7 @@ class HybridVOcd:
         self.t_cum = np.zeros((3, 1))
         self.traj = [self.t_cum.ravel().copy()]
 
-        # ORB + FLANN-LSH (para el ejecutable) y BFMatcher (para compatibilidad con slam.py)
+        # ORB + FLANN-LSH (para el ejecutable) y BFMatcher (compat slam.py)
         self.orb = cv2.ORB_create(3000)
         FLANN_INDEX_LSH = 6
         index_params = dict(algorithm=FLANN_INDEX_LSH, table_number=6, key_size=12, multi_probe_level=1)
@@ -257,7 +257,7 @@ class HybridVOcd:
         z = depth[v, u]
         keep = ~np.isnan(z)
         u = u[keep]; v = v[keep]; z = z[keep]
-        pts = np.stack([u * z, v * z, z], axis=1).astype(np.float64)  # s p
+        pts = np.stack([u * z, v * z, z], axis=1).astype(np.float64)
         pts = (self.K_inv @ pts.T).T  # (N,3)
         return pts
 
@@ -299,6 +299,7 @@ class HybridVOcd:
                 return R, t
             except Exception:
                 pass
+
         ok, rvec, tvec, inliers = cv2.solvePnPRansac(
             pts3d.astype(np.float64), pts2d.astype(np.float64), self.K, None,
             flags=cv2.SOLVEPNP_ITERATIVE, reprojectionError=3.0, iterationsCount=100
@@ -316,21 +317,32 @@ class HybridVOcd:
         good = self._get_matches_kp(k1, k2, d1, d2)
         if len(good) < self.min_matches:
             return False
+
         pts1 = np.float32([k1[m.queryIdx].pt for m in good])
         pts2 = np.float32([k2[m.trainIdx].pt for m in good])
-        E, mask = cv2.findEssentialMat(pts1, pts2, self.K, method=cv2.RANSAC, prob=0.999, threshold=self.ransac_thresh)
+
+        E, mask = cv2.findEssentialMat(pts1, pts2, self.K, method=cv2.RANSAC,
+                                       prob=0.999, threshold=self.ransac_thresh)
         if E is None:
             return False
-        in1 = pts1[mask.ravel() == 1]; in2 = pts2[mask.ravel() == 1]
+
+        in1 = pts1[mask.ravel() == 1]
+        in2 = pts2[mask.ravel() == 1]
         _, R, t, _ = cv2.recoverPose(E, in1, in2, self.K)
-        t_step = (self.R_cum @ t) * 1.0
+
+        # Acumular (en coords mundo: t en cámara -> rotar por R_cum)
+        t_step = (self.R_cum @ t)
         self.t_cum = self.t_cum + t_step
         self.R_cum = R @ self.R_cum
         self.traj.append(self.t_cum.ravel().copy())
+
         if self.show:
             draw = cv2.drawMatches(prev_gray, k1, gray, k2, good[:100], None,
                                    flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS)
             cv2.imshow("Matches (MONO)", draw)
+            # Visor trayectoria
+            traj_update_from_pose(self.t_cum.ravel().copy())
+
         self._maybe_save_pose(ts)
         return True
 
@@ -340,27 +352,36 @@ class HybridVOcd:
         good = self._get_matches_kp(k1, k2, d1, d2)
         if len(good) < self.min_matches:
             return False
+
         pts1 = np.float32([k1[m.queryIdx].pt for m in good])
         pts2 = np.float32([k2[m.trainIdx].pt for m in good])
+
         pts3d = self._project_2d_to_3d(depth_prev, pts1)
         if pts3d.shape[0] < 6:
             return False
+
         valid_mask = ~np.isnan(pts3d).any(axis=1)
         pts3d = pts3d[valid_mask]
         pts2d = pts2[valid_mask]
         if pts3d.shape[0] < 6:
             return False
+
         R, t = self._solve_pnp(pts3d, pts2d)
         if R is None:
             return False
+
         t_step = (self.R_cum @ t)
         self.t_cum = self.t_cum + t_step
         self.R_cum = R @ self.R_cum
         self.traj.append(self.t_cum.ravel().copy())
+
         if self.show:
             draw = cv2.drawMatches(prev_gray, k1, gray, k2, good[:100], None,
                                    flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS)
             cv2.imshow("Matches (PnP)", draw)
+            # Visor trayectoria
+            traj_update_from_pose(self.t_cum.ravel().copy())
+
         self._maybe_save_pose(ts)
         return True
 
@@ -434,23 +455,28 @@ def main():
         sys.exit(1)
     K = estimate_intrinsics(frame0.shape, args.fx, args.fy, args.cx, args.cy)
 
+    # Crear VO **antes** de cualquier uso (p. ej., SGBM)
     vo = HybridVOcd(K, baseline=args.baseline, method=method, show=args.show,
-                  min_matches=args.min_matches, ratio_thresh=args.ratio,
-                  dist_thresh=args.dist, use_homography=(not args.no_homography),
-                  ransac_thresh=args.ransac_thresh, save_txt=args.poses_txt)
+                    min_matches=args.min_matches, ratio_thresh=args.ratio,
+                    dist_thresh=args.dist, use_homography=(not args.no_homography),
+                    ransac_thresh=args.ransac_thresh, save_txt=args.poses_txt)
+
+    # Inicializar visor si corresponde
+    if args.show:
+        init_traj_view("Trayectoria (VO)")
 
     prev_gray = cv2.cvtColor(frame0, cv2.COLOR_BGR2GRAY)
     idx = 1
     depth_prev = None
 
-    # Si stereo, preparar primer depth
+    # Si stereo, preparar depth del frame 0 (alineando left0-right0)
     if method == VOMethod.STEREO_3D2D:
         okr0, frame0_r = read_frame(right_handle, right_kind, 0)
         if not okr0:
             print("❌ No se pudo leer el primer frame derecho")
             sys.exit(1)
         disp0 = vo.sgbm.compute(cv2.cvtColor(frame0, cv2.COLOR_BGR2GRAY),
-                                 cv2.cvtColor(frame0_r, cv2.COLOR_BGR2GRAY)).astype(np.float32) / 16.0
+                                cv2.cvtColor(frame0_r, cv2.COLOR_BGR2GRAY)).astype(np.float32) / 16.0
         depth_prev = vo._depth_from_disparity(disp0)
         if args.show:
             dv = np.nan_to_num(depth_prev, nan=5.0)
@@ -459,6 +485,7 @@ def main():
             dv = cv2.applyColorMap(dv, cv2.COLORMAP_TURBO)
             cv2.imshow("Depth", dv)
 
+    # Si depth puro, cargar el depth del frame 0
     if method == VOMethod.DEPTH_3D2D:
         dpath0 = args.depth % 0 if "%" in args.depth else args.depth
         depth_prev = cv2.imread(dpath0, cv2.IMREAD_UNCHANGED)
@@ -467,7 +494,7 @@ def main():
             sys.exit(1)
         depth_prev = depth_prev.astype(np.float32)
 
-    # Loop
+    # Loop principal
     max_frames = args.max_frames if args.max_frames is not None else 10**9
     t0 = time.time()
     frames = 1
@@ -484,11 +511,13 @@ def main():
         else:
             # actualizar depth_prev para cada paso
             if method == VOMethod.STEREO_3D2D:
-                okr, frame_r = read_frame(right_handle, right_kind, idx)
+                # IMPORTANTE: disparidad para el "prev" -> usar right en (idx-1)
+                okr, frame_r_prev = read_frame(right_handle, right_kind, idx - 1)
                 if not okr:
                     break
-                disp = vo.sgbm.compute(cv2.cvtColor(prev_gray, cv2.COLOR_BGR2GRAY if prev_gray.ndim==3 else prev_gray),
-                                        cv2.cvtColor(frame_r, cv2.COLOR_BGR2GRAY)).astype(np.float32) / 16.0
+                left_prev = prev_gray if prev_gray.ndim == 2 else cv2.cvtColor(prev_gray, cv2.COLOR_BGR2GRAY)
+                right_prev = cv2.cvtColor(frame_r_prev, cv2.COLOR_BGR2GRAY)
+                disp = vo.sgbm.compute(left_prev, right_prev).astype(np.float32) / 16.0
                 depth_prev = vo._depth_from_disparity(disp)
             else:  # DEPTH
                 dpath = args.depth % (idx - 1) if "%" in args.depth else args.depth
@@ -496,9 +525,12 @@ def main():
                 if depth_prev is None:
                     break
                 depth_prev = depth_prev.astype(np.float32)
+
             okstep = vo.step_pnp(prev_gray, gray, depth_prev, ts)
 
+        # Escape si falló el paso (podés poner lógica de reintento)
         if not okstep:
+            # seguimos intentando con frames siguientes
             pass
 
         if args.show:
@@ -512,6 +544,7 @@ def main():
     if args.show:
         cv2.destroyAllWindows()
 
+    # Guardado final (una sola vez)
     traj = np.vstack(vo.traj).astype(np.float32)
     np.save(args.traj_npy, traj)
     print(f"✅ Guardado {args.traj_npy} con {len(traj)} poses")
