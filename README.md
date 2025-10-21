@@ -10,7 +10,7 @@ utils.py: utilidades (proyección, ángulos, etc.).
 
 eval/associate.py y evaluate_ate,py: idk
 
-#en mac 
+# en mac 
 python3 -m venv .venv
 source .venv/bin/activate
 #en windows 
@@ -20,10 +20,14 @@ python -m venv .venv
 pip install -r requirements.txt
 
 para slam descargar el dataset, descomprimirlo y crear un acceso 
-
+en mac 
 mkdir -p datasets/tum_rgbd cd datasets/tum_rgbd wget https://vision.in.tum.de/rgbd/dataset/freiburg1/rgbd_dataset_freiburg1_desk.tgz tar -xvzf rgbd_dataset_freiburg1_desk.tgz
+en windows 
 
-para descomprimir 
+Invoke-WebRequest -Uri "https://vision.in.tum.de/rgbd/dataset/freiburg1/rgbd_dataset_freiburg1_desk.tgz" -OutFile "rgbd_dataset_freiburg1_desk.tgz"
+para descomprimir en windows 
+tar -xvzf rgbd_dataset_freiburg1_desk.tgz
+
 
 para crear ruta 
 en mac ln -s /ruta/absoluta/a/rgbd_dataset_freiburg1_desk rgbd_dataset_freiburg1_desk
