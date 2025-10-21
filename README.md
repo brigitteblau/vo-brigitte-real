@@ -1,101 +1,41 @@
-python vo_hibrido.py --input test1.mp4 --method mono --show
-python slam.py
+vo_hibrido.py: VO monocular y 3D-2D (stereo/depth) con ORB + Essential/PnP.
 
+slam.py: tracking, gestión de keyframes y mapa, bundle adjustment opcional.
 
-hay que instalar el dataset antes de usarlo el dataset tum que no se puede subir al repo 
+visualization.py: visor de trayectoria (Pangolin si existe; Matplotlib si no).
 
-Dataset externo
+optimizer.py: Bundle Adjustment (si está habilitado).
 
-GitHub no permite subir archivos mayores a 100 MB, por eso el dataset original
-datasets/datasets/rgbd_dataset_freiburg1_desk.tgz no se incluye en el repo.
+utils.py: utilidades (proyección, ángulos, etc.).
 
-Descargalo desde:
-👉 TUM RGB-D Dataset – freiburg1_desk
+eval/associate.py y evaluate_ate,py: idk
 
-Y colocalo en la carpeta:
-
-datasets/datasets/
-
-
-Estructura esperada:
-
-vo-brigitte/
- ├── main_runner.py
- ├── vo_hibrido.py
- ├── optimizer.py
- └── datasets/
-      └── datasets/
-           └── rgbd_dataset_freiburg1_desk.tgz
-
-Perfecto 💪 te dejo cómo documentar eso todo en el README, con el comando que usaste para instalar el repo y el fix del push grande.
-
-🧰 Instalación local
-# 1️⃣ Cloná el repo
-git clone https://github.com/brigitteblau/vo-brigitte.git
-cd vo-brigitte
-
-# 2️⃣ Creá y activá el entorno virtual
+#en mac 
 python3 -m venv .venv
-source .venv/bin/activate   # macOS / Linux
-# o en Windows:
-# .venv\Scripts\activate
+source .venv/bin/activate
+#en windows 
+python -m venv .venv
+.venv\Scripts\Activate.ps1
 
-# 3️⃣ Instalá dependencias
 pip install -r requirements.txt
 
+para slam descargar el dataset, descomprimirlo y crear un acceso 
 
-⚠️ Si usás g2o-python y falla en macOS ARM, podés correr:
+mkdir -p datasets/tum_rgbd cd datasets/tum_rgbd wget https://vision.in.tum.de/rgbd/dataset/freiburg1/rgbd_dataset_freiburg1_desk.tgz tar -xvzf rgbd_dataset_freiburg1_desk.tgz
 
-pip install -U g2o-python --only-binary=:all:
+para descomprimir 
 
-
-o simplemente usar el fallback de OpenCV (solvePnPRansac)
-1️⃣ Descargar el dataset TUM RGB-D
-
-Elegí uno de los más livianos para probar, por ejemplo freiburg1_desk:
-
-mkdir -p datasets/tum_rgbd
-cd datasets/tum_rgbd
-wget https://vision.in.tum.de/rgbd/dataset/freiburg1/rgbd_dataset_freiburg1_desk.tgz
-tar -xvzf rgbd_dataset_freiburg1_desk.tgz
+para crear ruta 
+en mac ln -s /ruta/absoluta/a/rgbd_dataset_freiburg1_desk rgbd_dataset_freiburg1_desk
+en windows New-Item -ItemType SymbolicLink -Path rgbd_dataset_freiburg1_desk -Target "C:\ruta\absoluta\rgbd_dataset_freiburg1_desk"
+si existe esta todo listo ls rgbd_dataset_freiburg1_desk/depth.txt
 
 
-👉 Esto te deja una carpeta:
+Hasta ahora tengo este comando bien 
+ python vo_hibrido.py --input test1.mp4 --method mono --show
+ los demas son solo con el nombre del archivo (sin params) 
 
-datasets/tum_rgbd/rgbd_dataset_freiburg1_desk/
-
-
-con los archivos rgb.txt, depth.txt, etc.
-
-(Si estás en macOS y no tenés wget, podés usar curl):
-
-curl -O https://vision.in.tum.de/rgbd/dataset/freiburg1/rgbd_dataset_freiburg1_desk.tgz
-tar -xvzf rgbd_dataset_freiburg1_desk.tgz
-
-⚙️ 2️⃣ Crear un acceso directo (enlace simbólico)
-
-Así no tenés que mover el dataset dentro de tu proyecto.
-
-Supongamos que tu proyecto está en:
-
-/Users/brigu/Desktop/vo-brigitte-real/
-
-
-Y descargaste el dataset en:
-
-/Users/brigu/Desktop/datasets/tum_rgbd/rgbd_dataset_freiburg1_desk/
-
-
-Desde la carpeta del proyecto (vo-brigitte-real), ejecutá:
-
-ln -s /Users/brigu/Desktop/datasets/tum_rgbd/rgbd_dataset_freiburg1_desk rgbd_dataset_freiburg1_desk
-
-
-💡 Esto crea un “acceso directo” dentro del proyecto, como si el dataset estuviera ahí.
-
-🧭 3️⃣ Verificá que existe depth.txt
-ls rgbd_dataset_freiburg1_desk/depth.txt
-
-
-Si aparece, ya está OK ✅
-Si no, asegurate de que el tar -xvzf realmente descomprimió los archivos 
+ #todo 
+ primero probar slam_bb.py 
+ luego cambiar la logica de decisor y de slam_Pose para mandar la pose correcta 
+ fijarme que anda mejor si slam o vo 
