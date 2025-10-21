@@ -39,3 +39,6 @@ Hasta ahora tengo este comando bien
  primero probar slam_bb.py 
  luego cambiar la logica de decisor y de slam_Pose para mandar la pose correcta 
  fijarme que anda mejor si slam o vo 
+
+si llego a eso 
+https://com0com.sourceforge.net/ <lo que me digo lucho>
