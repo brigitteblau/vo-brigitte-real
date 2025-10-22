@@ -2,6 +2,8 @@
 .venv/
 venv/
 
+rgbd_dataset_freiburg1_desk/
+
 # Cachés de Python
 __pycache__/
 *.py[cod]

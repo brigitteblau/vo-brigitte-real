@@ -34,7 +34,6 @@ class Frame:  # keyframe is the same
         # index of associated map point for each keypoint. None => no association
         self.map_point_ids = [None] * len(kpts)
 
-
 class Tracking:
     def __init__(
         self,
@@ -82,7 +81,7 @@ class Tracking:
         # By default, mapping is done in a separate process (see main_stereo_slam.py)
         self.disable_multiprocessing = True
         if self.disable_multiprocessing:
-            self.map = Map(cx, cy, fx)  # run mapping in the same thread
+            self.map = Map(cx, cy, fx)  
 
         # --------- State ---------
         self.frames: List[Frame] = []
@@ -143,10 +142,20 @@ class Tracking:
         points_3d_k = self.vo._project_2d_kpts_to_3d(depth_t, kpts_t)  # (N, 3)
 
         # --------- Eliminate features with invalid depth -----------
-        mask = np.isnan(points_3d_k).any(axis=1)
-        kpts_t = np.array(kpts_t)[~mask]
-        desc_t = desc_t[~mask]
-        points_3d_k = points_3d_k[~mask]
+        # FIX 1: Validar profundidad Y distancia razonable
+        valid_depth_mask = ~np.isnan(points_3d_k).any(axis=1)
+        depth_distances = np.linalg.norm(points_3d_k, axis=1)
+        
+        # Solo aceptar puntos entre 0.3m y 5m (ajustar según escena)
+        valid_distance_mask = (depth_distances > 0.3) & (depth_distances < 5.0)
+        
+        final_mask = valid_depth_mask & valid_distance_mask
+        
+        kpts_t = kpts_t[final_mask]
+        desc_t = desc_t[final_mask]
+        points_3d_k = points_3d_k[final_mask]
+        
+        print(f"Valid points after filtering: {len(kpts_t)} (depth filter removed {(~final_mask).sum()})")
 
         # ---------- Predict Pose using constant velocity model -----------
         if len(self.frames) >= 2:
@@ -198,10 +207,22 @@ class Tracking:
         valid_pts_mask = np.array([map_point is not None for map_point in curr_frame.map_point_ids])
         p_2d = p_2d[valid_pts_mask]
         p_3d_w = p_3d_w[valid_pts_mask]
+        
+        print(f"Total map points tracked: {len(p_2d)}")
+        
+        # FIX 3: Verificar que tenemos suficientes puntos para solvePnP
+        if len(p_2d) < 4:
+            print(f"ERROR: Not enough points for PnP ({len(p_2d)}), using previous pose")
+            curr_frame.pose = predicted_pose
+            self.frames.append(curr_frame)
+            self.frames_elapsed_since_keyframe += 1
+            if self.visualize:
+                traj_update_from_pose(curr_frame.pose)
+            return
+        
         k_T_w = np.linalg.inv(curr_frame.pose)
         p_3d_k = (k_T_w @ np.hstack([p_3d_w, np.ones((len(p_3d_w), 1))]).T).T[:, :3]
 
-        print("Total map points tracked", len(p_2d))
         # --------- Estimate Camera Pose by minimizing reprojection error -----------
         T = self.vo._minimize_reprojection_error(p_2d, p_3d_k)
         estimated_pose = prev_frame.pose @ T
@@ -213,7 +234,22 @@ class Tracking:
             traj_update_from_pose(curr_frame.pose)
 
         # ---------- Determine if is keyframe -----------
-        if len(p_2d) < 150 or self.frames_elapsed_since_keyframe > 20:
+        # FIX 4: Criterio más robusto para crear keyframes
+        movement = np.linalg.norm(curr_frame.pose[:3, 3] - prev_frame.pose[:3, 3])
+        rotation_change = np.linalg.norm(
+            curr_frame.pose[:3, :3] - prev_frame.pose[:3, :3]
+        )
+        
+        should_create_keyframe = (
+            len(p_2d) < 100 or 
+            self.frames_elapsed_since_keyframe > 15 or
+            (movement > 0.3 and self.frames_elapsed_since_keyframe > 5) or
+            (rotation_change > 0.2 and self.frames_elapsed_since_keyframe > 5)
+        )
+        
+        if should_create_keyframe:
+            print(f"Creating keyframe: points={len(p_2d)}, movement={movement:.3f}m, "
+                  f"rotation={rotation_change:.3f}, frames_elapsed={self.frames_elapsed_since_keyframe}")
             keyframe = self.add_keyframe_tracking(curr_frame)
             self.send_keyframe_to_mapping(curr_frame)  # frame without updated map points
             curr_frame = keyframe
@@ -380,7 +416,6 @@ class Tracking:
             matched_points[m.trainIdx] = prev_map_point_ids[m.queryIdx]
 
         return matched_points, good_matches
-
 
 class MapPoint:
     def __init__(self, position, desc, keyframe_id, keyframe_position):

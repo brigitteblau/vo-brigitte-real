@@ -40,9 +40,14 @@ Hasta ahora tengo este comando bien
  los demas son solo con el nombre del archivo (sin params) 
 
  #todo 
- primero probar slam_bb.py 
+ ver uqe onda ahroa slam_bb-py 
+ intertar lo de conda con luca 
+ despues: 
  luego cambiar la logica de decisor y de slam_Pose para mandar la pose correcta 
  fijarme que anda mejor si slam o vo 
+  
+  para probar lo de g2o probar mirando este video https://www.youtube.com/watch?v=2fPamhQtaP8 entorno virtual de conda 
 
+.vemv
 si llego a eso 
 https://com0com.sourceforge.net/ <lo que me digo lucho>
