@@ -1,0 +1,38 @@
+serial:
+  port: "COM5"      # Cambiá según tu PC: "COM3", "/dev/ttyUSB0", etc.
+  baud: 115200
+
+camera:
+  index: 0
+  width: 640
+  height: 480
+  fps: 30
+  # Si tenés calibración real, ponela acá:
+  K: [ [520,0,320], [0,520,240], [0,0,1] ]
+  dist: [0,0,0,0,0]
+  aruco_tag_size_m: 0.12
+
+threads:
+  imu_hz: 30
+  cam_fps: 1
+  control_hz: 50
+
+ekf:
+  Q_diag: [1e-4,1e-4,1e-5, 1e-3,1e-3,1e-4]
+  P0_diag: [1,1,0.0076, 0.1,0.1,0.0076]   # 0.0076 ≈ (5°)^2 en rad^2
+  R_pose_diag: [0.0004,0.0004,0.0012]     # [x,y,θ]  (m^2, m^2, rad^2)
+  R_heading: 0.0076                       # (5°)^2
+
+pid:
+  v_base: 0.30
+  lateral: { kp: 0.9, ki: 0.0, kd: 0.08, umin: -0.6, umax: 0.6 }
+  heading: { kp: 1.2, ki: 0.0, kd: 0.05, umin: -1.2, umax: 1.2 }
+
+vo:
+  lane_conf_threshold: 0.55
+  aruco_enabled: false
+  canny1: 60
+  canny2: 150
+  hough_thresh: 30
+  hough_min_len: 30
+  hough_max_gap: 10

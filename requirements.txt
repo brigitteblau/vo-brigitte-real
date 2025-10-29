@@ -1,18 +1,4 @@
-
-numpy>=1.24
-scipy>=1.11
-matplotlib>=3.8
-
-opencv-python>=4.9
-opencv-contrib-python>=4.9
-
-# --- Visual SLAM / Optimización (opcionales pero recomendados) ---
-# g2o     
-# pypangolin
-
-
-tqdm>=4.66
-requests>=2.32
-Pillow>=10.0
-
-python-dotenv
+numpy
+opencv-python
+pyyaml
+pyserial
