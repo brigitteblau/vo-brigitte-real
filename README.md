@@ -17,7 +17,7 @@ source .venv/bin/activate
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 
-pip install -r requirements.txt
+pip install -r requirements.t
 
 para slam descargar el dataset, descomprimirlo y crear un acceso 
 en mac 
