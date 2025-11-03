@@ -28,7 +28,9 @@ import time
 import cv2
 import numpy as np
 from enum import Enum
-from visualization import init_traj_view, traj_update_from_pose, save_trajectory_npy  # noqa: F401
+from visualization import init_traj_view, traj_update_from_pose, save_trajectory_npy  
+from control.decisor import Decisor
+from control.motion_iface import make_motor
 
 # ------------ g2o opcional -------------
 USE_G2O = False
@@ -119,6 +121,11 @@ def to_quat(R):
             q[3] = (m[1, 0] - m[0, 1]) / s
     return q  # (x,y,z,w)
 
+def yaw_from_R(R):
+    """Devuelve yaw (rad) de la rotación (convención Z yaw, XYZ)."""
+    # Asumiendo Rz * Ry * Rx, yaw = atan2(R21, R11) si usás Z-forward;
+    # común en VO 3D: yaw alrededor de eje Z (plano x-y).
+    return float(np.arctan2(R[1,0], R[0,0]))
 
 # ------------- VO Core ------------------
 

@@ -1,52 +1,68 @@
-#decisor.py
-from connect import connect
-from send import send_line
-from slam_pose import obtener_pose_actual
-import time
+# control/decisor.py
 import math
+import time
 
-def decidir_direccion(x, y, yaw):
+class Decisor:
     """
-    Decide un comando de movimiento según la pose actual.
-    Editá estas reglas con tu lógica real del SLAM.
+    Convierte (x,y,yaw) en un comando discreto robusto.
+    - Deadband angular y lineal
+    - Histeresis: sostiene el último comando por un mínimo de tiempo
+    - Rate limit: no spamea al backend
     """
+    def __init__(self,
+                 lin_deadband=0.02,          # m: ignora movimiento ínfimo
+                 yaw_deadband_deg=6.0,       # °: pequeña oscilación no gira
+                 min_hold_s=0.25,            # s: mantener comando al menos esto
+                 send_hz=5.0,                # Hz: como mucho N cmds/seg
+                 x_target=1.0):              # m: ejemplo simple de objetivo x
+        self.lin_dead = lin_deadband
+        self.yaw_dead = math.radians(yaw_deadband_deg)
+        self.min_hold = min_hold_s
+        self.min_dt = 1.0 / max(1e-3, send_hz)
+        self._last_cmd = None
+        self._last_send = 0.0
+        self.x_target = x_target
 
-    if x < 1.0:
-        return "adelante"
-    elif yaw > math.radians(90):
-        return "izquierda"
-    elif yaw < -math.radians(90):
-        return "derecha"
-    else:
-        return "atras"
+    def _needs_send(self, now, cmd):
+        if (now - self._last_send) < self.min_dt:
+            return False
+        if self._last_cmd is None:
+            return True
+        if cmd != self._last_cmd and (now - self._last_send) < self.min_hold:
+            # no cambies demasiado rápido
+            return False
+        return True
 
-def main():
-    sock = connect()
-    try:
-        while True:
-            x, y, yaw = obtener_pose_actual()
-            direccion = decidir_direccion(x, y, yaw)
+    def decide(self, x, y, yaw):
+        """
+        Reglas simples:
+        - Si yaw muy a la izquierda  → izquierda
+        - Si yaw muy a la derecha    → derecha
+        - Si aún no alcanzaste x_target → FWD
+        - Si te pasaste mucho         → BACK (o parar si muy cerca)
+        """
+        # Normalizá yaw a [-pi, pi] por las dudas
+        yaw = math.atan2(math.sin(yaw), math.cos(yaw))
 
-            # Traducción a comandos que entiende la Raspi:
-            if direccion == "adelante":
-                send_line(sock, "FWD")
-            elif direccion == "atras":
-                send_line(sock, "BACK")
-            elif direccion == "izquierda":
-                send_line(sock, "LEFT")
-            elif direccion == "derecha":
-                send_line(sock, "RIGHT")
+        # Giros primero (prioridad a estabilizar heading)
+        if yaw > self.yaw_dead:
+            cmd = "izquierda"
+        elif yaw < -self.yaw_dead:
+            cmd = "derecha"
+        else:
+            # Heading OK: control lineal en x
+            err = self.x_target - x
+            if abs(err) < self.lin_dead:
+                cmd = "parar"
+            elif err > 0:
+                cmd = "adelante"
             else:
-                send_line(sock, "STOP")
+                cmd = "atras"
 
-            print(f"[DECISOR] ({x:.2f}, {y:.2f}, yaw={yaw:.2f}) → {direccion}")
-            time.sleep(1.0)
-    except KeyboardInterrupt:
-        send_line(sock, "STOP")
-        print("[DECISOR] Interrumpido por el usuario.")
-    finally:
-        sock.close()
-        print("[DECISOR] Conexión cerrada.")
-
-if __name__ == "__main__":
-    main()
+        now = time.time()
+        if self._needs_send(now, cmd):
+            self._last_cmd = cmd
+            self._last_send = now
+            return cmd, True
+        else:
+            return cmd, False
