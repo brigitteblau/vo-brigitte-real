@@ -2,7 +2,18 @@ python vo_hibrido.py --method mono --input 0 --show
 
 python vo_hibrido.py --method mono --input test1.mp4 --show
 
-
+ip raspi  192.168.04
+wifi linksys
+protocolo ssh
+contraseña de la raspi "hola"
+el procediento 
+paso 1 
+entrar al cmd  y pones c: 
+paso 2 
+escribir sshuserpi@192.168.04
+paso 3
+contra hola 
+paso 4 
 
 vo_hibrido.py: VO monocular y 3D-2D (stereo/depth) con ORB + Essential/PnP.
 

@@ -1,27 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-VO HÍBRIDO (Mono / Stereo / Depth)
-- ORB + Emparejamiento robusto (FLANN LSH / BF) + Homografía opcional
-- Mono: Essential + recoverPose (2D-2D)
-- Stereo/Depth: PnP (3D-2D) vía solvePnPRansac (g2o opcional si está)
-- Visualización: usa OpenCV 2D (visualization.py). Pangolin NO requerido.
-
-Ejemplos:
-1) Monocular (2D-2D):
-   python vo_hibrido.py --input 0 --method mono --show
-
-2) Stereo (3D-2D por disparidad):
-   python vo_hibrido.py --left "data/left_%06d.png" --right "data/right_%06d.png" --method stereo --show
-
-3) Depth (RGB + depth.png/exr):
-   python vo_hibrido.py --input data/rgb.mp4 --depth "data/depth_%06d.exr" --method depth --show
-
-Salida:
-- --traj_npy trajectory.npy (N,3)
-- --poses_txt poses.txt (timestamp x y z qx qy qz qw)
-"""
-
 import argparse
 import os
 import sys
@@ -29,37 +5,32 @@ import time
 import cv2
 import numpy as np
 from enum import Enum
-
-from visualization import init_traj_view, traj_update_from_pose, save_trajectory_npy
+from visualization import init_traj_view, traj_update_from_pose, set_3d_view_params,  save_trajectory_npy
 from control.decisor import Decisor
 
-# ------------ g2o opcional -------------
 USE_G2O = False
 try:
-    import g2o  # type: ignore
+    import g2o 
     USE_G2O = True
 except Exception:
     USE_G2O = False
 
 
+
 class VOMethod(Enum):
-    MONO_2D2D = 1   # Essential
-    STEREO_3D2D = 2 # PnP con disparidad (Stereo)
-    DEPTH_3D2D = 3  # PnP con mapa de profundidad provisto
-
-
-# ---------------- Utils -----------------
+    MONO_2D2D = 1  
+    STEREO_3D2D = 2 
+    DEPTH_3D2D = 3 
 
 def open_source(src):
     """Permite índice ('0','1'), ruta a video o patrón de imágenes (%06d)."""
     if src is None:
         return None, None
     if isinstance(src, str) and src.isdigit():
-        # Forzar backend DS en Windows para cámaras
         cap = cv2.VideoCapture(int(src), cv2.CAP_DSHOW)
         return cap, "video"
     if isinstance(src, str) and ("%" in src or "*" in src):
-        return src, "images"  # patrón de imágenes
+        return src, "images" 
     cap = cv2.VideoCapture(src)
     return cap, "video"
 
@@ -72,7 +43,6 @@ def read_frame(handle, kind, idx):
         ok, frame = handle.read()
         return ok, frame
     else:
-        # patrón de imágenes tipo left_%06d.png -> sprintf con idx
         path = handle % idx
         if not os.path.exists(path):
             return False, None
@@ -121,15 +91,13 @@ def to_quat(R):
             q[1] = (m[1, 2] + m[2, 1]) / s
             q[2] = 0.25 * s
             q[3] = (m[1, 0] - m[0, 1]) / s
-    return q  # (x,y,z,w)
+    return q  
 
 
 def yaw_from_R(R):
     """Devuelve yaw (rad) de la rotación (convención Z yaw, XYZ)."""
     return float(np.arctan2(R[1, 0], R[0, 0]))
 
-
-# ------------- VO Core ------------------
 
 class HybridVOcd:
     def __init__(self, K, baseline=0.1, method=VOMethod.MONO_2D2D,
@@ -147,12 +115,10 @@ class HybridVOcd:
         self.ransac_thresh = ransac_thresh
         self.save_txt = save_txt
 
-        # Estado pose acumulada
         self.R_cum = np.eye(3)
         self.t_cum = np.zeros((3, 1))
         self.traj = [self.t_cum.ravel().copy()]
 
-        # ORB + FLANN-LSH (y BF por compatibilidad si quisieras)
         self.orb = cv2.ORB_create(3000)
         FLANN_INDEX_LSH = 6
         index_params = dict(algorithm=FLANN_INDEX_LSH, table_number=6, key_size=12, multi_probe_level=1)
@@ -160,10 +126,8 @@ class HybridVOcd:
         self.flann = cv2.FlannBasedMatcher(indexParams=index_params, searchParams=search_params)
         self.bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
 
-        # Stereo SGBM para disparidad si hace falta
         self.sgbm = cv2.StereoSGBM_create(minDisparity=0, numDisparities=128, blockSize=5)
 
-        # --- Control / Decisor ---
         self.decisor = Decisor()                       # usa tus deadbands y rate limit
         self.on_command = lambda cmd: print(f"[CMD] {cmd}")  # callback por defecto
 
