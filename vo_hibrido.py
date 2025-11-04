@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 VO HÍBRIDO (Mono / Stereo / Depth)
-- ORB + Emparejamiento robusto (FLANN LSH) + Homografía opcional para filtrar
+- ORB + Emparejamiento robusto (FLANN LSH / BF) + Homografía opcional
 - Mono: Essential + recoverPose (2D-2D)
 - Stereo/Depth: PnP (3D-2D) vía solvePnPRansac (g2o opcional si está)
-- Visualización: usa pypangolin si existe; si no, fallback 2D con Matplotlib (Windows-friendly)
+- Visualización: usa OpenCV 2D (visualization.py). Pangolin NO requerido.
 
 Ejemplos:
 1) Monocular (2D-2D):
-   python vo_hibrido.py --input test1.mp4 --method mono --show
+   python vo_hibrido.py --input 0 --method mono --show
 
 2) Stereo (3D-2D por disparidad):
-   python vo_hibrido.py --left left_%06d.png --right right_%06d.png --method stereo --show
+   python vo_hibrido.py --left "data/left_%06d.png" --right "data/right_%06d.png" --method stereo --show
 
 3) Depth (RGB + depth.png/exr):
-   python vo_hibrido.py --input rgb.mp4 --depth depth_%06d.exr --method depth --show
+   python vo_hibrido.py --input data/rgb.mp4 --depth "data/depth_%06d.exr" --method depth --show
 
 Salida:
 - --traj_npy trajectory.npy (N,3)
@@ -28,9 +29,9 @@ import time
 import cv2
 import numpy as np
 from enum import Enum
-from visualization import init_traj_view, traj_update_from_pose, save_trajectory_npy  
+
+from visualization import init_traj_view, traj_update_from_pose, save_trajectory_npy
 from control.decisor import Decisor
-from control.motion_iface import make_motor
 
 # ------------ g2o opcional -------------
 USE_G2O = False
@@ -54,6 +55,7 @@ def open_source(src):
     if src is None:
         return None, None
     if isinstance(src, str) and src.isdigit():
+        # Forzar backend DS en Windows para cámaras
         cap = cv2.VideoCapture(int(src), cv2.CAP_DSHOW)
         return cap, "video"
     if isinstance(src, str) and ("%" in src or "*" in src):
@@ -121,11 +123,11 @@ def to_quat(R):
             q[3] = (m[1, 0] - m[0, 1]) / s
     return q  # (x,y,z,w)
 
+
 def yaw_from_R(R):
     """Devuelve yaw (rad) de la rotación (convención Z yaw, XYZ)."""
-    # Asumiendo Rz * Ry * Rx, yaw = atan2(R21, R11) si usás Z-forward;
-    # común en VO 3D: yaw alrededor de eje Z (plano x-y).
-    return float(np.arctan2(R[1,0], R[0,0]))
+    return float(np.arctan2(R[1, 0], R[0, 0]))
+
 
 # ------------- VO Core ------------------
 
@@ -145,12 +147,12 @@ class HybridVOcd:
         self.ransac_thresh = ransac_thresh
         self.save_txt = save_txt
 
-        # Estado
+        # Estado pose acumulada
         self.R_cum = np.eye(3)
         self.t_cum = np.zeros((3, 1))
         self.traj = [self.t_cum.ravel().copy()]
 
-        # ORB + FLANN-LSH (para el ejecutable) y BFMatcher (compat slam.py)
+        # ORB + FLANN-LSH (y BF por compatibilidad si quisieras)
         self.orb = cv2.ORB_create(3000)
         FLANN_INDEX_LSH = 6
         index_params = dict(algorithm=FLANN_INDEX_LSH, table_number=6, key_size=12, multi_probe_level=1)
@@ -161,11 +163,15 @@ class HybridVOcd:
         # Stereo SGBM para disparidad si hace falta
         self.sgbm = cv2.StereoSGBM_create(minDisparity=0, numDisparities=128, blockSize=5)
 
+        # --- Control / Decisor ---
+        self.decisor = Decisor()                       # usa tus deadbands y rate limit
+        self.on_command = lambda cmd: print(f"[CMD] {cmd}")  # callback por defecto
+
         if self.save_txt:
             with open(self.save_txt, "w") as f:
                 f.write("# timestamp x y z qx qy qz qw\n")
 
-    # ---------- Helpers compatibles con slam.py ----------
+    # ---------- Helpers compatibles ----------
     def _convert_grayscale(self, img_bgr: np.ndarray) -> np.ndarray:
         if img_bgr.ndim == 2:
             return img_bgr
@@ -178,7 +184,6 @@ class HybridVOcd:
         return kpts, desc
 
     def _project_2d_kpts_to_3d(self, depth_img: np.ndarray, kpts_xy: np.ndarray) -> np.ndarray:
-        """Backprojecta (u,v,z) -> (x,y,z) en coords de cámara. depth en metros; NaN = inválido."""
         fx = self.K[0, 0]; fy = self.K[1, 1]; cx = self.K[0, 2]; cy = self.K[1, 2]
         N = len(kpts_xy)
         pts3d = np.full((N, 3), np.nan, dtype=float)
@@ -193,7 +198,6 @@ class HybridVOcd:
         return pts3d
 
     def _get_matches(self, prev_kpts_xy, curr_kpts_xy, prev_desc, curr_desc):
-        """Compatibilidad con slam.py: usa solo descriptores y devuelve DMatch tras Lowe 0.75."""
         if prev_desc is None or curr_desc is None or len(prev_desc) == 0 or len(curr_desc) == 0:
             return []
         knn = self.bf.knnMatch(prev_desc, curr_desc, k=2)
@@ -207,7 +211,6 @@ class HybridVOcd:
         return good
 
     def _minimize_reprojection_error(self, p2d_pix: np.ndarray, p3d_cam_pred: np.ndarray) -> np.ndarray:
-        """Devuelve delta de pose T (4x4) vía PnP. Compatibilidad con slam.py."""
         valid = np.isfinite(p3d_cam_pred).all(axis=1)
         obj = p3d_cam_pred[valid]
         img = p2d_pix[valid]
@@ -224,7 +227,7 @@ class HybridVOcd:
         T[:3, 3] = tvec.ravel()
         return T
 
-    # ---------- Matching robusto del senior (para ejecutable CLI) ----------
+    # ---------- Matching robusto ----------
     def _get_matches_kp(self, k1, k2, d1, d2):
         if d1 is None or d2 is None or len(d1) == 0 or len(d2) == 0:
             return []
@@ -317,7 +320,18 @@ class HybridVOcd:
         t = tvec.reshape(3, 1)
         return R, t
 
-    # ---------- Pasos para el ejecutable CLI ----------
+    # ---------- Control: emitir comando ----------
+    def _emit_cmd_from_pose(self):
+        x, y, _ = self.t_cum.ravel()
+        yaw = yaw_from_R(self.R_cum)
+        cmd, should_send = self.decisor.decide(x, y, yaw)
+        if should_send:
+            try:
+                self.on_command(cmd)
+            except Exception as e:
+                print(f"[WARN] fallo al enviar comando: {e}")
+
+    # ---------- Pasos VO ----------
     def step_mono(self, prev_gray, gray, ts):
         k1, d1 = self.orb.detectAndCompute(prev_gray, None)
         k2, d2 = self.orb.detectAndCompute(gray, None)
@@ -330,11 +344,14 @@ class HybridVOcd:
 
         E, mask = cv2.findEssentialMat(pts1, pts2, self.K, method=cv2.RANSAC,
                                        prob=0.999, threshold=self.ransac_thresh)
-        if E is None:
+        if E is None or mask is None:
             return False
 
         in1 = pts1[mask.ravel() == 1]
         in2 = pts2[mask.ravel() == 1]
+        if len(in1) < 5:
+            return False
+
         _, R, t, _ = cv2.recoverPose(E, in1, in2, self.K)
 
         # Acumular (en coords mundo: t en cámara -> rotar por R_cum)
@@ -347,9 +364,9 @@ class HybridVOcd:
             draw = cv2.drawMatches(prev_gray, k1, gray, k2, good[:100], None,
                                    flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS)
             cv2.imshow("Matches (MONO)", draw)
-            # Visor trayectoria
             traj_update_from_pose(self.t_cum.ravel().copy())
 
+        self._emit_cmd_from_pose()
         self._maybe_save_pose(ts)
         return True
 
@@ -386,9 +403,9 @@ class HybridVOcd:
             draw = cv2.drawMatches(prev_gray, k1, gray, k2, good[:100], None,
                                    flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS)
             cv2.imshow("Matches (PnP)", draw)
-            # Visor trayectoria
             traj_update_from_pose(self.t_cum.ravel().copy())
 
+        self._emit_cmd_from_pose()
         self._maybe_save_pose(ts)
         return True
 
@@ -425,6 +442,7 @@ def main():
     ap.add_argument("--dist", type=float, default=50.0)
     ap.add_argument("--no_homography", action="store_true")
     ap.add_argument("--ransac_thresh", type=float, default=1.0)
+    ap.add_argument("--udp", help="ip:puerto para enviar comandos por UDP (opcional)", default=None)
     args = ap.parse_args()
 
     method = {
@@ -435,7 +453,7 @@ def main():
 
     # Abrir fuentes
     if args.input and (args.left or args.right):
-        print("⚠️ Usa --input (mono) o --left/--right (stereo), no ambos.")
+        print("⚠️ Usa --input (mono/depth) o --left/--right (stereo), no ambos.")
         sys.exit(1)
 
     left_handle, left_kind = (None, None)
@@ -462,11 +480,22 @@ def main():
         sys.exit(1)
     K = estimate_intrinsics(frame0.shape, args.fx, args.fy, args.cx, args.cy)
 
-    # Crear VO **antes** de cualquier uso (p. ej., SGBM)
+    # Crear VO
     vo = HybridVOcd(K, baseline=args.baseline, method=method, show=args.show,
                     min_matches=args.min_matches, ratio_thresh=args.ratio,
                     dist_thresh=args.dist, use_homography=(not args.no_homography),
                     ransac_thresh=args.ransac_thresh, save_txt=args.poses_txt)
+
+    # Inicializar salida UDP si corresponde
+    if args.udp:
+        import socket
+        host, port = args.udp.split(":")
+        addr = (host, int(port))
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        def _send_udp(cmd: str):
+            sock.sendto(cmd.encode("utf-8"), addr)
+        vo.on_command = _send_udp
+        print(f"[INFO] Enviando comandos UDP a {addr}")
 
     # Inicializar visor si corresponde
     if args.show:
@@ -504,7 +533,6 @@ def main():
     # Loop principal
     max_frames = args.max_frames if args.max_frames is not None else 10**9
     t0 = time.time()
-    frames = 1
 
     while idx < max_frames:
         ok, frame = read_frame(left_handle, left_kind, idx)
@@ -518,7 +546,7 @@ def main():
         else:
             # actualizar depth_prev para cada paso
             if method == VOMethod.STEREO_3D2D:
-                # IMPORTANTE: disparidad para el "prev" -> usar right en (idx-1)
+                # disparidad para el "prev" -> usar right en (idx-1)
                 okr, frame_r_prev = read_frame(right_handle, right_kind, idx - 1)
                 if not okr:
                     break
@@ -535,18 +563,13 @@ def main():
 
             okstep = vo.step_pnp(prev_gray, gray, depth_prev, ts)
 
-        # Escape si falló el paso (podés poner lógica de reintento)
-        if not okstep:
-            # seguimos intentando con frames siguientes
-            pass
-
+        # si falló el paso, seguir intentando con frames siguientes
         if args.show:
             if cv2.waitKey(1) & 0xFF == 27:
                 break
 
         prev_gray = gray
         idx += 1
-        frames += 1
 
     if args.show:
         cv2.destroyAllWindows()
