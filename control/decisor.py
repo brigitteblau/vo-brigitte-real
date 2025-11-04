@@ -10,9 +10,9 @@ class Decisor:
     - Rate limit: no spamea al backend
     """
     def __init__(self,
-                 lin_deadband=0.02,          # m: ignora movimiento ínfimo
+                 lin_deadband=0.2,          # m: ignora movimiento ínfimo
                  yaw_deadband_deg=6.0,       # °: pequeña oscilación no gira
-                 min_hold_s=0.25,            # s: mantener comando al menos esto
+                 min_hold_s=0.5,            # s: mantener comando al menos esto
                  send_hz=5.0,                # Hz: como mucho N cmds/seg
                  x_target=1.0):              # m: ejemplo simple de objetivo x
         self.lin_dead = lin_deadband

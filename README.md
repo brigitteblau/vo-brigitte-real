@@ -1,3 +1,9 @@
+python vo_hibrido.py --method mono --input 0 --show
+
+python vo_hibrido.py --method mono --input test1.mp4 --show
+
+
+
 vo_hibrido.py: VO monocular y 3D-2D (stereo/depth) con ORB + Essential/PnP.
 
 slam.py: tracking, gestión de keyframes y mapa, bundle adjustment opcional.
