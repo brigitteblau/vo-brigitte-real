@@ -22,17 +22,104 @@ class VOMethod(Enum):
     STEREO_3D2D = 2 
     DEPTH_3D2D = 3 
 
-def open_source(src):
-    """Permite índice ('0','1'), ruta a video o patrón de imágenes (%06d)."""
+import cv2
+
+# --- Wrapper para usar Picamera2 como si fuera cv2.VideoCapture
+class PiCamCapture:
+    def __init__(self, size=(640, 480), fps=30, fourcc="XRGB8888"):
+        from picamera2 import Picamera2
+        self.picam2 = Picamera2()
+        # Configuración de video estable para CV (formato 8-bit)
+        self.picam2.configure(
+            self.picam2.create_video_configuration(
+                main={"format": fourcc, "size": size},
+                controls={"FrameDurationLimits": (int(1e6/fps), int(1e6/fps))}
+            )
+        )
+        self.picam2.start()
+
+    def isOpened(self):
+        return True
+
+    def read(self):
+        frame = self.picam2.capture_array()
+        # Devuelve (ret, frame) como OpenCV
+        return True, frame
+
+    def release(self):
+        self.picam2.stop()
+
+def _try_v4l2(index=0, width=None, height=None, fps=None):
+    # Intenta abrir /dev/video{index} con V4L2
+    cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
+    if width:  cap.set(cv2.CAP_PROP_FRAME_WIDTH,  width)
+    if height: cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+    if fps:    cap.set(cv2.CAP_PROP_FPS,          fps)
+    return cap if cap.isOpened() else None
+
+def _try_gstreamer(width=640, height=480, fps=30):
+    # Solo si tu OpenCV fue compilado con GStreamer
+    pipeline = (
+        f"libcamerasrc ! video/x-raw, width={width}, height={height}, "
+        f"framerate={fps}/1 ! videoconvert ! appsink"
+    )
+    cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+    return cap if cap.isOpened() else None
+
+def _try_picamera2(width=640, height=480, fps=30):
+    try:
+        cap = PiCamCapture(size=(width, height), fps=fps)
+        return cap
+    except Exception:
+        return None
+
+def open_source(src, width=640, height=480, fps=30):
+    """
+    Abre fuente de imágenes para tu VO:
+      - '0' o '1' => intenta v4l2 (/dev/videoX) y si falla cae a Picamera2
+      - 'raspi'/'pi'/'picam'/'libcamera' => abre Picamera2 directo
+      - patrón con % o * => secuencia de imágenes
+      - otra string => ruta a video
+    Retorna (cap_or_path, kind) donde kind in {"video","images","raspi"}.
+    """
     if src is None:
         return None, None
+
+    # Opción explícita: forzá la cámara Pi via libcamera
+    if isinstance(src, str) and src.lower() in {"raspi", "pi", "picam", "libcamera"}:
+        cap = _try_picamera2(width, height, fps)
+        if cap: return cap, "raspi"
+        # fallback por si tu OpenCV tiene gstreamer
+        cap = _try_gstreamer(width, height, fps)
+        if cap: return cap, "video"
+        return None, None
+
+    # Índice de cámara "0", "1", etc.
     if isinstance(src, str) and src.isdigit():
-        cap = cv2.VideoCapture(int(src), cv2.CAP_DSHOW)
-        return cap, "video"
+        cap = _try_v4l2(int(src), width, height, fps)
+        if cap: return cap, "video"
+        # fallback a Picamera2 si /dev/videoX no existe
+        cap = _try_picamera2(width, height, fps)
+        if cap: return cap, "raspi"
+        # último intento: gstreamer
+        cap = _try_gstreamer(width, height, fps)
+        if cap: return cap, "video"
+        return None, None
+
+    # Patrón de imágenes
     if isinstance(src, str) and ("%" in src or "*" in src):
-        return src, "images" 
+        return src, "images"
+
+    # Ruta a archivo de video
     cap = cv2.VideoCapture(src)
-    return cap, "video"
+    if cap.isOpened():
+        return cap, "video"
+
+    # Si todo falla y estás en Pi, intentá Picamera2
+    cap = _try_picamera2(width, height, fps)
+    if cap: return cap, "raspi"
+
+    return None, None
 
 
 def read_frame(handle, kind, idx):
