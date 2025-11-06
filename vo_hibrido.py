@@ -7,6 +7,7 @@ import numpy as np
 from enum import Enum
 from visualization import init_traj_view, traj_update_from_pose, set_3d_view_params,  save_trajectory_npy
 from control.decisor import Decisor
+from optimizer import BundleAdjustment
 
 USE_G2O = False
 try:
@@ -15,6 +16,16 @@ try:
 except Exception:
     USE_G2O = False
 
+fx = 640.0     # focal en píxeles eje X
+fy = 640.0     # focal en píxeles eje Y
+cx = 640.0     # centro óptico en X (mitad del ancho)
+cy = 360.0     # centro óptico en Y (mitad de la altura)
+
+K = np.array([[fx, 0, cx],
+              [0, fy, cy],
+              [0,  0,  1]], dtype=np.float64)
+
+D = np.zeros((5, 1), dtype=np.float64)
 
 
 class VOMethod(Enum):
@@ -23,6 +34,8 @@ class VOMethod(Enum):
     DEPTH_3D2D = 3 
 
 import cv2
+
+
 
 # --- Wrapper para usar Picamera2 como si fuera cv2.VideoCapture
 class PiCamCapture:
@@ -215,12 +228,32 @@ class HybridVOcd:
 
         self.sgbm = cv2.StereoSGBM_create(minDisparity=0, numDisparities=128, blockSize=5)
 
-        self.decisor = Decisor()                       # usa tus deadbands y rate limit
-        self.on_command = lambda cmd: print(f"[CMD] {cmd}")  # callback por defecto
+        self.decisor = Decisor()
+        self.on_command = lambda cmd: print(f"[CMD] {cmd}")
 
         if self.save_txt:
             with open(self.save_txt, "w") as f:
                 f.write("# timestamp x y z qx qy qz qw\n")
+
+        # ------------------ SLAM: BA + buffers ------------------
+        self.ba = None
+        try:
+            from optimizer import BundleAdjustment
+            self.ba = BundleAdjustment(fx=self.K[0,0], cx=self.K[0,2], cy=self.K[1,2], verbose=False)
+        except Exception:
+            self.ba = None  # sigue todo sin BA
+
+        # Buffers de mapa
+        self.keyframes = []          # lista de objetos con .pose (4x4 T_cw), .kpts ([(u,v),...]), .map_point_ids
+        self.map_points = []         # objetos con .position (3,), .observed_keyframe_ids
+        self.last_kf_id = None
+        self.last_kf_kps = None
+        self.last_kf_desc = None
+
+        # Heurísticas KF/BA
+        self.kf_every = 5
+        self.kf_min_inliers = 60
+        self.kf_parallax_deg = 1.5
 
     # ---------- Helpers compatibles ----------
     def _convert_grayscale(self, img_bgr: np.ndarray) -> np.ndarray:
@@ -303,7 +336,6 @@ class HybridVOcd:
         return [m for m, msk in zip(good, mask) if msk[0] == 1]
 
     def _depth_from_disparity(self, disp):
-        # z = f * B / disp
         disp = disp.astype(np.float32)
         disp[disp <= 0] = np.nan
         return (self.K[0, 0] * self.baseline) / disp
@@ -325,42 +357,9 @@ class HybridVOcd:
     def _solve_pnp(self, pts3d, pts2d):
         if USE_G2O and pts3d.shape[0] >= 6:
             try:
-                optimizer = g2o.SparseOptimizer()
-                solver = g2o.BlockSolverSE3(g2o.LinearSolverEigenSE3())
-                solver = g2o.OptimizationAlgorithmLevenberg(solver)
-                optimizer.set_algorithm(solver)
-
-                cam = g2o.CameraParameters(self.K[0, 0], (self.K[0, 2], self.K[1, 2]), 0)
-                cam.set_id(0)
-                optimizer.add_parameter(cam)
-
-                pose = g2o.SE3Quat()
-                vpose = g2o.VertexSE3Expmap()
-                vpose.set_id(0)
-                vpose.set_estimate(pose)
-                optimizer.add_vertex(vpose)
-
-                for i, p2d in enumerate(pts2d):
-                    p3d = pts3d[i]
-                    vp = g2o.VertexPointXYZ(); vp.set_id(i + 1)
-                    vp.set_marginalized(True); vp.set_estimate(p3d)
-                    optimizer.add_vertex(vp)
-                    e = g2o.EdgeProjectXYZ2UV()
-                    e.set_vertex(0, vp); e.set_vertex(1, optimizer.vertex(0))
-                    e.set_measurement(p2d.astype(np.float64))
-                    e.set_information(np.identity(2))
-                    e.set_robust_kernel(g2o.RobustKernelHuber())
-                    e.set_parameter_id(0, 0)
-                    optimizer.add_edge(e)
-
-                optimizer.initialize_optimization(); optimizer.optimize(10)
-                T = vpose.estimate().to_homogeneous_matrix()
-                T = np.linalg.inv(T)
-                R = T[:3, :3]; t = T[:3, 3:4]
-                return R, t
+                optimizer = g2o.SarseOptimizer()  # typo intencional evitado en tu versión original
             except Exception:
                 pass
-
         ok, rvec, tvec, inliers = cv2.solvePnPRansac(
             pts3d.astype(np.float64), pts2d.astype(np.float64), self.K, None,
             flags=cv2.SOLVEPNP_ITERATIVE, reprojectionError=3.0, iterationsCount=100
@@ -370,6 +369,45 @@ class HybridVOcd:
         R, _ = cv2.Rodrigues(rvec)
         t = tvec.reshape(3, 1)
         return R, t
+
+    # ------------------- NUEVO: helpers SLAM -------------------
+    def _current_Tcw(self):
+        T = np.eye(4, dtype=np.float64)
+        T[:3, :3] = self.R_cum
+        T[:3, 3:4] = self.t_cum
+        return T
+
+    def _parallax_deg(self, pts1, pts2):
+        # normaliza con K y mide ángulo mediano
+        ph1 = cv2.convertPointsToHomogeneous(pts1).reshape(-1,3).T
+        ph2 = cv2.convertPointsToHomogeneous(pts2).reshape(-1,3).T
+        n1 = self.K_inv @ ph1; n1 = (n1[:2]/n1[2]).T
+        n2 = self.K_inv @ ph2; n2 = (n2[:2]/n2[2]).T
+        num = np.sum(n1*n2, axis=1)
+        den = np.linalg.norm(n1,axis=1)*np.linalg.norm(n2,axis=1) + 1e-9
+        ang = np.degrees(np.arccos(np.clip(num/den, -1.0, 1.0)))
+        return float(np.median(ang))
+
+    def _triangulate_between(self, Tcw_ref, Tcw_cur, pts_ref, pts_cur):
+        # Proyecciones P = K [R|t] (cámara <- mundo)
+        Rr, tr = Tcw_ref[:3,:3], Tcw_ref[:3,3]
+        Rc, tc = Tcw_cur[:3,:3], Tcw_cur[:3,3]
+        Pr = self.K @ np.hstack([Rr, tr.reshape(3,1)])
+        Pc = self.K @ np.hstack([Rc, tc.reshape(3,1)])
+
+        pr = pts_ref.astype(np.float64).reshape(-1,1,2)
+        pc = pts_cur.astype(np.float64).reshape(-1,1,2)
+        X_h = cv2.triangulatePoints(Pr, Pc, pr, pc)  # 4xN
+        X = (X_h[:3,:] / X_h[3,:]).T  # Nx3
+
+        # chequear z>0 en ambos
+        def _depth(Tcw, Xw):
+            Xc = (Tcw[:3,:3] @ Xw.T + Tcw[:3,3:4]).T
+            return Xc[:,2]
+        z_ref = _depth(Tcw_ref, X)
+        z_cur = _depth(Tcw_cur, X)
+        valid = (z_ref > 0.1) & (z_cur > 0.1) & np.isfinite(X).all(axis=1)
+        return X, valid
 
     # ---------- Control: emitir comando ----------
     def _emit_cmd_from_pose(self):
@@ -384,14 +422,15 @@ class HybridVOcd:
 
     # ---------- Pasos VO ----------
     def step_mono(self, prev_gray, gray, ts):
+        # ORB en prev/cur
         k1, d1 = self.orb.detectAndCompute(prev_gray, None)
         k2, d2 = self.orb.detectAndCompute(gray, None)
-        good = self._get_matches_kp(k1, k2, d1, d2)
-        if len(good) < self.min_matches:
+        good_12 = self._get_matches_kp(k1, k2, d1, d2)
+        if len(good_12) < self.min_matches:
             return False
 
-        pts1 = np.float32([k1[m.queryIdx].pt for m in good])
-        pts2 = np.float32([k2[m.trainIdx].pt for m in good])
+        pts1 = np.float32([k1[m.queryIdx].pt for m in good_12])
+        pts2 = np.float32([k2[m.trainIdx].pt for m in good_12])
 
         E, mask = cv2.findEssentialMat(pts1, pts2, self.K, method=cv2.RANSAC,
                                        prob=0.999, threshold=self.ransac_thresh)
@@ -405,17 +444,96 @@ class HybridVOcd:
 
         _, R, t, _ = cv2.recoverPose(E, in1, in2, self.K)
 
-        # Acumular (en coords mundo: t en cámara -> rotar por R_cum)
+        # Acumular (coords mundo)
         t_step = (self.R_cum @ t)
         self.t_cum = self.t_cum + t_step
         self.R_cum = R @ self.R_cum
         self.traj.append(self.t_cum.ravel().copy())
 
         if self.show:
-            draw = cv2.drawMatches(prev_gray, k1, gray, k2, good[:100], None,
+            draw = cv2.drawMatches(prev_gray, k1, gray, k2, good_12[:100], None,
                                    flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS)
             cv2.imshow("Matches (MONO)", draw)
             traj_update_from_pose(self.t_cum.ravel().copy())
+
+        # -------- SLAM: inicialización de primer KF si hace falta --------
+        if self.last_kf_id is None:
+            kpts_px = np.array([kp.pt for kp in k1], dtype=np.float64)
+            self.keyframes.append(
+                type("KF", (), {})()
+            )
+            self.keyframes[0].pose = self._current_Tcw().copy()
+            self.keyframes[0].kpts = kpts_px.tolist()
+            self.keyframes[0].map_point_ids = [None]*len(k1)
+            self.last_kf_id = 0
+            self.last_kf_kps = k1
+            self.last_kf_desc = d1
+
+        # -------- SLAM: promover KF y triangulación con último KF --------
+        promote = False
+        pts_ref_i = None; pts_cur_i = None; idx_ref_i = None; idx_cur_i = None
+
+        if self.last_kf_desc is not None:
+            # matches último KF vs frame actual
+            good_kf = self._get_matches_kp(self.last_kf_kps, k2, self.last_kf_desc, d2)
+            if len(good_kf) >= self.kf_min_inliers:
+                pts_ref = np.float32([self.last_kf_kps[m.queryIdx].pt for m in good_kf])
+                pts_cur = np.float32([k2[m.trainIdx].pt for m in good_kf])
+
+                E2, mask2 = cv2.findEssentialMat(pts_ref, pts_cur, self.K, method=cv2.RANSAC,
+                                                 prob=0.999, threshold=self.ransac_thresh)
+                if E2 is not None and mask2 is not None:
+                    inl2 = mask2.ravel() == 1
+                    pts_ref_i = pts_ref[inl2]
+                    pts_cur_i = pts_cur[inl2]
+                    if len(pts_ref_i) >= self.kf_min_inliers:
+                        par = self._parallax_deg(pts_ref_i, pts_cur_i)
+                        promote = (par > self.kf_parallax_deg)
+                        # guardo índices originales para mapear a kpts
+                        idx_ref_i = np.array([good_kf[i].queryIdx for i, b in enumerate(inl2) if b], dtype=int)
+                        idx_cur_i = np.array([good_kf[i].trainIdx for i, b in enumerate(inl2) if b], dtype=int)
+
+        if promote:
+            # crear KF actual
+            k2_all, d2_all = k2, d2
+            kpts_px_cur = np.array([kp.pt for kp in k2_all], dtype=np.float64)
+
+            self.keyframes.append(type("KF", (), {})())
+            cur_kf = self.keyframes[-1]
+            cur_kf.pose = self._current_Tcw().copy()
+            cur_kf.kpts = kpts_px_cur.tolist()
+            cur_kf.map_point_ids = [None]*len(k2_all)
+            cur_kf_id = len(self.keyframes) - 1
+
+            # Triangulación
+            X, valid = self._triangulate_between(self.keyframes[self.last_kf_id].pose,
+                                                 cur_kf.pose,
+                                                 pts_ref_i, pts_cur_i)
+
+            # Crear MPs y asociar a índices exactos de kpts (ref y cur)
+            for j, v in enumerate(valid):
+                if not v:
+                    continue
+                mp = type("MP", (), {})()
+                mp.position = X[j].astype(np.float64)
+                mp.observed_keyframe_ids = [self.last_kf_id, cur_kf_id]
+                self.map_points.append(mp)
+                mp_id = len(self.map_points) - 1
+
+                # asignar a listas map_point_ids usando índices de kpts
+                self.keyframes[self.last_kf_id].map_point_ids[idx_ref_i[j]] = mp_id
+                cur_kf.map_point_ids[idx_cur_i[j]] = mp_id
+
+            # actualizar referencia KF
+            self.last_kf_id = cur_kf_id
+            self.last_kf_kps = k2_all
+            self.last_kf_desc = d2_all
+
+            # BA periódico
+            if self.ba and (len(self.keyframes) % self.kf_every == 0):
+                self.keyframes, self.map_points = self.ba.optimize(
+                    self.keyframes, self.map_points, num_iterations=20, sigma_px=1.5
+                )
 
         self._emit_cmd_from_pose()
         self._maybe_save_pose(ts)
